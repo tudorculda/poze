@@ -1,87 +1,49 @@
-import org.apache.kafka.common.serialization.Deserializer;
-import org.apache.avro.io.DatumReader;
-import org.apache.avro.io.Decoder;
-import org.apache.avro.io.DecoderFactory;
-import org.apache.avro.specific.SpecificDatumReader;
-import org.apache.avro.specific.SpecificRecord;
+import org.apache.avro.io.DatumWriter;
+import org.apache.avro.io.Encoder;
+import org.apache.avro.io.EncoderFactory;
+import org.apache.avro.specific.SpecificDatumWriter;
+import org.apache.kafka.clients.producer.*;
 
-import java.util.Map;
+import java.io.ByteArrayOutputStream;
+import java.util.Properties;
 
-public class AvroKafkaDeserializer<T extends SpecificRecord> implements Deserializer<T> {
+public class AvroProducer {
 
-    private final Class<T> targetType;
-
-    public AvroKafkaDeserializer(Class<T> targetType) {
-        this.targetType = targetType;
-    }
-
-    @Override
-    public T deserialize(String topic, byte[] data) {
-        try {
-            DatumReader<T> reader = new SpecificDatumReader<>(targetType);
-            Decoder decoder = DecoderFactory.get().binaryDecoder(data, null);
-            return reader.read(null, decoder);
-        } catch (Exception e) {
-            throw new RuntimeException("Avro deserialization error", e);
-        }
-    }
-
-    @Override
-    public void configure(Map<String, ?> configs, boolean isKey) { }
-
-    @Override
-    public void close() { }
-}
-
-
-
-
-
-
-
-
-import org.springframework.context.annotation.Bean;
-import org.springframework.kafka.annotation.EnableKafka;
-import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
-import org.springframework.kafka.core.ConsumerFactory;
-import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
-
-import java.util.HashMap;
-import java.util.Map;
-
-@Configuration
-@EnableKafka
-public class KafkaConsumerConfig {
-
-    @Bean
-    public ConsumerFactory<String, MyAvroClass> consumerFactory() {
-        Map<String, Object> props = new HashMap<>();
+    public static void main(String[] args) throws Exception {
+        // Kafka config
+        Properties props = new Properties();
         props.put("bootstrap.servers", "localhost:9092");
-        props.put("group.id", "my-group");
-        props.put("key.deserializer", org.apache.kafka.common.serialization.StringDeserializer.class);
-        props.put("value.deserializer", AvroKafkaDeserializer.class);
-        props.put("specific.avro.reader", true);
+        props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+        props.put("value.serializer", "org.apache.kafka.common.serialization.ByteArraySerializer");
 
-        return new DefaultKafkaConsumerFactory<>(
-            props,
-            new org.apache.kafka.common.serialization.StringDeserializer(),
-            new AvroKafkaDeserializer<>(MyAvroClass.class)
-        );
+        KafkaProducer<String, byte[]> producer = new KafkaProducer<>(props);
+
+        // Create Avro record
+        MyRecord record = MyRecord.newBuilder()
+            .setId(1)
+            .setName("Test Avro")
+            .build();
+
+        // Serialize to Avro binary
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        DatumWriter<MyRecord> writer = new SpecificDatumWriter<>(MyRecord.class);
+        Encoder encoder = EncoderFactory.get().binaryEncoder(out, null);
+        writer.write(record, encoder);
+        encoder.flush();
+        byte[] avroBytes = out.toByteArray();
+        out.close();
+
+        // Send to Kafka
+        ProducerRecord<String, byte[]> message = new ProducerRecord<>("my-topic", "my-key", avroBytes);
+        producer.send(message, (metadata, ex) -> {
+            if (ex == null) {
+                System.out.println("Message sent to topic: " + metadata.topic());
+            } else {
+                ex.printStackTrace();
+            }
+        });
+
+        producer.flush();
+        producer.close();
     }
-
-    @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, MyAvroClass> kafkaListenerContainerFactory() {
-        ConcurrentKafkaListenerContainerFactory<String, MyAvroClass> factory =
-                new ConcurrentKafkaListenerContainerFactory<>();
-        factory.setConsumerFactory(consumerFactory());
-        return factory;
-    }
-}
-
-
-
-
-@KafkaListener(topics = "my-topic", groupId = "my-group")
-public void listen(MyAvroClass message) {
-    System.out.println("Received: " + message);
 }
